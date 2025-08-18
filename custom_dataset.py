@@ -26,7 +26,8 @@ class CustomVQADataset(Dataset):
         image_root: str = "",
         question_max_length: int = 40,
         answer_max_length: int = 20,
-        padding: str = "max_length"
+        padding: str = "max_length",
+        is_medical: bool = False,
     ):
         """
         Args:
@@ -71,36 +72,63 @@ class CustomVQADataset(Dataset):
         # Load image (RGB)
         image = Image.open(img_path).convert("RGB")
 
-        # Encode image + question (inputs)
-        enc = self.processor(
-            images=image,
-            text=question,
-            padding=self.padding,
-            max_length=self.question_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
+        # method 1: callback processor
+        try:
+            inputs = self.processor(
+                images=image,
+                text=question,
+                text_target=answer,
+                padding=self.padding,
+                max_length=self.question_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
 
-        # Encode answer (labels). We set pad positions to -100 so they are ignored by loss.
-        labels = self.processor.tokenizer(
-            answer,
-            padding=self.padding,
-            max_length=self.answer_max_length,
-            truncation=True,
-            return_tensors="pt",
-        ).input_ids[0]
+            sample = {
+                "pixel_values": inputs["pixel_values"][0],
+                "input_ids": inputs["input_ids"][0],
+                "attention_mask": inputs["attention_mask"][0],
+                "labels": inputs["labels"][0],
+            }
 
-        pad_token_id = self.processor.tokenizer.pad_token_id
-        labels = labels.clone()
-        labels[labels == pad_token_id] = -100  # ignore padding in loss
+        except Exception as e:
+            print(f"Method 1 failed: {e}, trying method 2...")
 
-        sample = {
-            "pixel_values": enc["pixel_values"][0],      # (3, H, W)
-            "input_ids": enc["input_ids"][0],            # (Q_len,)
-            "attention_mask": enc["attention_mask"][0],  # (Q_len,)
-            "labels": labels,                             # (A_len,)
-        }
-        # Optional helpful fields
-        if "question_id" in ex:
-            sample["question_id"] = torch.tensor(ex["question_id"], dtype=torch.long)
+            # 方法2：分别处理图像+问题和答案
+            # metho 2: deal with image+question and answer separately
+            enc = self.processor(
+                images=image,
+                text=question,
+                padding=self.padding,
+                max_length=self.question_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            # directly use tokenizer to handle answers (not text_target）
+            labels = self.processor.tokenizer(
+                answer,  # remove text_target
+                padding=self.padding,
+                max_length=self.answer_max_length,
+                truncation=True,
+                return_tensors="pt",
+            ).input_ids[0]
+
+            pad_token_id = self.processor.tokenizer.pad_token_id
+            labels = labels.clone()
+            labels[labels == pad_token_id] = -100
+
+            sample = {
+                "pixel_values": enc["pixel_values"][0],
+                "input_ids": enc["input_ids"][0],
+                "attention_mask": enc["attention_mask"][0],
+                "labels": labels,
+            }
+
+        # Debug info
+        # print(f"Answer: {answer}")
+        # print(f"Labels shape: {sample['labels'].shape}")
+        # print(f"Labels min/max: {sample['labels'].min()}, {sample['labels'].max()}")
+        # print(f"Vocab size: {self.processor.tokenizer.vocab_size}")
+
         return sample
